@@ -104,9 +104,11 @@ buf[1..64] = 64-byte payload, where:
 | `setup`         | `'<'` 0x3C   | DataLogger btn6 (= F6 Setup, toggles)|
 | `freeze`        | `'?'` 0x3F   | DataLogger cmdFreeze                |
 
-The VM also cycles `'1'`–`'5'` to retrieve scope/spectrum sample buffers
-into bytes 40..63 of the response. v1 ignores those modes; the on-meter
-LCD is the only display.
+Cmds `'1'`–`'5'` retrieve scope/spectrum sample buffers — but unlike
+cmds `'0'` and `'6'` they repurpose the **whole 64-byte IN report** as
+sample data (NOT just bytes 40..63 — that "secondary slot" model only
+applies to telemetry frames). See "Scope and spectrum sample buffers"
+below.
 
 **Firmware quirk — per-channel verbs in auto-channel mode:** `range_step`
 (F3) and `alarm_toggle` (F4) are per-channel settings. When the meter is
@@ -152,6 +154,47 @@ samples). The HID owner alternates the OUT poll: every 10th tick sends
 non-empty status sticks across plain telemetry frames so the UI doesn't
 flicker.
 
+### Scope and spectrum sample buffers (cmds `'1'`..`'5'`)
+
+The firmware splits the on-LCD display buffer across 5 segments,
+each delivered as a 64-byte IN report in response to OUT cmds
+`'1'`..`'5'`. Concatenated in cmd order they form a single
+**320-byte buffer**, 8-bit unsigned samples (the per-cmd boundary is
+just a wire-protocol detail; the buffer is logically contiguous —
+confirmed by spectral peaks straddling cmd boundaries).
+
+What you get depends on the meter's current LCD page (`top_mode`):
+
+| `top_mode` | cmd `'1'`..`'5'` IN frame contents                          |
+|------------|--------------------------------------------------------------|
+| `power_swr` | echo only (byte[0] = cmd char, rest zero — firmware refuses) |
+| `waveform`  | envelope samples, 0..255 normalized to LCD trace height      |
+| `spectrum`  | FFT-bin magnitudes, 0..255 normalized to LCD bar height      |
+| `setup`     | echo only                                                    |
+
+**Samples are normalized for display, not absolute units.** The
+firmware auto-scales each trace so its peak fits the LCD (mirroring
+the Teensy reference `f_page1.ino` / `g_page2.ino` logic). A steady
+carrier produces a uniform-value scope buffer (e.g. all bytes = 151
+in our 2026-05-15 probe at ~466 W). For absolute power, use the
+matching telemetry frame's `power_avg_w` / `power_peak_w`.
+
+**Refresh model.** Each segment cmd returns a static snapshot; the
+buffer doesn't auto-update inside a short window of repeated reads.
+The hub's HID owner polls one full cycle (cmd `'0'` then cmds
+`'1'`..`'5'`, 6 ticks total ≈ 240 ms at the default 40 ms poll
+cadence) and emits one `scope` / `spectrum` WS frame per assembly,
+giving ~4 Hz refresh while the meter is on the matching LCD page.
+During power_swr / setup modes the HID owner reverts to the legacy
+cycle (cmd `'0'` every tick, cmd `'6'` every 10th).
+
+**Sample rate / time base not yet measured.** Phase 1 reverse-
+engineering captured uniform buffers (steady carrier into dummy
+load). Sample rate of the scope buffer and absolute frequency-bin
+spacing of the spectrum buffer require a CW key-up edge for timing
+correlation — deferred. The current decoder treats samples and
+bins as opaque ordered arrays; the Mac client renders shape.
+
 ### What the firmware does NOT expose over USB (definitive)
 
 Verified by exhaustive search of the 5500-frame `LP700.pcapng`:
@@ -187,9 +230,24 @@ them empty and the web UI hides the rows that would have shown them.
 ## Diagnostic subcommands
 
 ```sh
-sudo lp700-server probe -list                              # enumerate every HID
-sudo lp700-server probe -dump                              # live raw + decoded frames
-sudo lp700-server probe -capture out.bin -duration 5s      # capture for analysis
+sudo lp700-server probe -list                                # enumerate every HID
+sudo lp700-server probe -dump                                # live raw + decoded frames
+sudo lp700-server probe -capture out.bin -duration 5s        # capture for analysis
+sudo lp700-server probe -samples -cycle-modes \
+     -channel 1 -range 1K -frames-per-cmd 30                 # reverse-engineer
+                                                             #   sample buffers
+```
+
+`-samples` cycles OUT cmds `'1'`..`'5'` across all three top_modes,
+optionally driving the meter to a known channel/range first. Used to
+reverse-engineer the wire format (see "Scope and spectrum sample
+buffers" above). Requires the service to be stopped first
+(`/dev/hidraw*` exclusive open):
+
+```sh
+sudo systemctl stop lp700-server
+sudo lp700-server probe -samples -cycle-modes > probe.txt
+sudo systemctl start lp700-server
 ```
 
 See ARCHITECTURE.md §11 for how to use these on a fresh meter.

@@ -75,8 +75,12 @@ are *not transmitted over USB* — see them on the meter LCD's Setup
 screen, not the web UI. (The Alarm panel's small note says the same.)
 
 The Waveform / 'Scope and Spectrum modes that the meter can display on
-its LCD are **not** mirrored to the web UI. The on-LCD mode keeps
-working normally; this client only renders the Power/SWR view.
+its LCD are **not** mirrored to the embedded web UI. The on-LCD mode
+keeps working normally; this client only renders the Power/SWR view.
+The Mac client in [LP-700-App](https://github.com/VU3ESV/LP-700-App)
+does render the scope and spectrum traces — the server publishes them
+as `{"type":"scope"}` and `{"type":"spectrum"}` WebSocket frames
+whenever the meter is on the matching LCD page.
 
 ---
 

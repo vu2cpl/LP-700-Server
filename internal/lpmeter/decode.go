@@ -102,11 +102,29 @@ func PollReport() []byte {
 // bytes 40..63 of the next telemetry frame with its current ASCII alert
 // message ("Reduce power or lower range" etc.). Per the LP700.pcapng
 // analysis the Telepost VM cycles through cmd '0' (live telemetry) and
-// cmd '6' (status text) along with `1`..`5` (scope/spec sample buffers
-// that v1 ignores).
+// cmd '6' (status text) along with `1`..`5` (scope/spec sample buffers).
 func StatusReport() []byte {
 	out := make([]byte, ReportSize)
 	out[0] = '6'
+	return out
+}
+
+// SampleReport returns the OUT payload that asks the meter to deliver
+// scope/spectrum buffer segment `seg` (1..5). The next IN report has
+// the firmware-populated 64-byte segment payload (the WHOLE 64 bytes,
+// not just bytes 40..63 — confirmed empirically 2026-05-15). Segments
+// 1..5 concatenate in order to produce a single SampleBufferSize-byte
+// buffer.
+//
+// Firmware ignores these cmds and returns an echo frame when the meter
+// is NOT on the corresponding LCD page (waveform for envelope samples,
+// spectrum for FFT bins). Power_SWR and Setup pages → echo only.
+func SampleReport(seg byte) []byte {
+	if seg < 1 || seg > 5 {
+		panic(fmt.Sprintf("sample segment %d out of range 1..5", seg))
+	}
+	out := make([]byte, ReportSize)
+	out[0] = '0' + seg // '1' .. '5'
 	return out
 }
 

@@ -2,6 +2,7 @@ package lpmeter
 
 import (
 	"encoding/binary"
+	"fmt"
 	"testing"
 )
 
@@ -244,6 +245,39 @@ func TestPollReportShape(t *testing.T) {
 	}
 	if p[0] != '0' {
 		t.Errorf("poll byte[0]=0x%02x, want '0' (0x30)", p[0])
+	}
+}
+
+func TestSampleReportLayout(t *testing.T) {
+	for seg := byte(1); seg <= 5; seg++ {
+		r := SampleReport(seg)
+		if len(r) != ReportSize {
+			t.Errorf("seg %d: size %d, want %d", seg, len(r), ReportSize)
+		}
+		want := byte('0') + seg
+		if r[0] != want {
+			t.Errorf("seg %d: byte[0]=0x%02x, want 0x%02x ('%c')", seg, r[0], want, want)
+		}
+		for i := 1; i < ReportSize; i++ {
+			if r[i] != 0 {
+				t.Errorf("seg %d: byte[%d]=0x%02x, want 0 (entire payload after byte 0 must be zero)", seg, i, r[i])
+				break
+			}
+		}
+	}
+}
+
+func TestSampleReportRejectsOutOfRange(t *testing.T) {
+	for _, seg := range []byte{0, 6, 7, 255} {
+		seg := seg
+		t.Run(fmt.Sprintf("seg=%d", seg), func(t *testing.T) {
+			defer func() {
+				if r := recover(); r == nil {
+					t.Errorf("seg %d: expected panic, got none", seg)
+				}
+			}()
+			_ = SampleReport(seg)
+		})
 	}
 }
 

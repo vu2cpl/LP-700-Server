@@ -112,7 +112,40 @@ frames carry a monotonic `seq` so clients can detect drops.
 { "type": "heartbeat", "seq": 12346, "ts": "..." }
 { "type": "status", "level": "warn", "msg": "hid reopened after 1.3s gap" }
 { "type": "ack", "ref": "client-supplied-id", "ok": true }
+
+// Emitted ~4 Hz while top_mode == "waveform" — full envelope buffer
+// assembled from 5 HID segments. Not subject to CloseEnough dedup.
+{
+  "type": "scope",
+  "seq": 12347,
+  "ts": "2026-05-15T17:14:25.103Z",
+  "data": {
+    "top_mode": "waveform",
+    "channel": 1,
+    "auto_channel": false,
+    "samples": [151, 151, 151, /* ... 320 u8 entries ... */]
+  }
+}
+
+// Emitted ~4 Hz while top_mode == "spectrum" — full FFT bin buffer.
+{
+  "type": "spectrum",
+  "seq": 12348,
+  "ts": "2026-05-15T17:14:25.347Z",
+  "data": {
+    "top_mode": "spectrum",
+    "channel": 1,
+    "auto_channel": false,
+    "bins": [77, 227, 127, /* ... 320 u8 entries ... */]
+  }
+}
 ```
+
+Sample frames (`scope` and `spectrum`) carry 320 8-bit unsigned
+values each, normalized for display height (the firmware auto-scales
+the trace; the values are NOT absolute watts). For power readings,
+use the matching `telemetry` frame. See CLAUDE.md "Scope and
+spectrum sample buffers" for the underlying HID protocol.
 
 **Client → server**
 

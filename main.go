@@ -60,20 +60,28 @@ func main() {
 	defer cancel()
 
 	snapCh := make(chan lpmeter.Snapshot, 8)
+	// Sample-buffer channels: buffer one full assembly per type. If
+	// the hub falls behind, the owner drops to the next assembly
+	// rather than blocking the meter loop.
+	scopeCh := make(chan lpmeter.ScopeFrame, 2)
+	spectrumCh := make(chan lpmeter.SpectrumFrame, 2)
 	pollEvery := time.Duration(cfg.Meter.PollMs) * time.Millisecond
 
 	var source lpmeter.Source
 	switch backend {
 	case lpmeter.BackendHID:
-		source = lpmeter.NewHIDOwner(cfg.Meter.VendorID, cfg.Meter.ProductID, pollEvery, snapCh, logger)
+		source = lpmeter.NewHIDOwner(cfg.Meter.VendorID, cfg.Meter.ProductID, pollEvery, snapCh, scopeCh, spectrumCh, logger)
 	case lpmeter.BackendSimulator:
+		// The simulator does not synthesize scope/spectrum buffers
+		// yet; the hub's nil-channel handling means no frames of
+		// those types will be broadcast under the simulator backend.
 		source = lpmeter.NewSimulator(pollEvery, snapCh, logger)
 	default:
 		logger.Error("unknown backend", "backend", backend)
 		os.Exit(1)
 	}
 
-	h := hub.NewHub(snapCh, source, hub.Options{
+	h := hub.NewHub(snapCh, scopeCh, spectrumCh, source, hub.Options{
 		Heartbeat:    time.Duration(cfg.Server.HeartbeatMs) * time.Millisecond,
 		MaxClients:   cfg.Server.MaxClients,
 		AllowControl: cfg.Server.AllowControl,
@@ -169,6 +177,11 @@ func runProbeSubcommand(args []string) int {
 	dump := fs.Bool("dump", false, "open the matched LP-500/700 and print every IN report (raw + best-effort decode) until ^C")
 	capture := fs.String("capture", "", "open the matched LP-500/700 and write IN reports to this path until duration elapses")
 	duration := fs.Duration("duration", 0, "for -capture, how long to record (0 = until ^C)")
+	samples := fs.Bool("samples", false, "cycle OUT cmds '1'..'5' and dump the secondary slot (bytes 40..63) — reverse-engineering aid for scope/spec buffers")
+	cycleModes := fs.Bool("cycle-modes", false, "for -samples: mode_step through power_swr / waveform / spectrum and repeat the cmd sweep in each")
+	framesPerCmd := fs.Int("frames-per-cmd", 16, "for -samples: number of IN frames captured per OUT cmd")
+	targetChannel := fs.Int("channel", 0, "for -samples: channel_step until on manual channel N (1..4) before the sweep; 0 = leave as-is")
+	targetRange := fs.String("range", "", "for -samples: range_step until on this range (e.g. 100W, 1K, auto) before the sweep; requires -channel set or already-manual channel")
 	vid := fs.Uint("vid", 0, "match this vendor id (hex, e.g. 0x0000); 0 = match by product string")
 	pid := fs.Uint("pid", 0, "match this product id; 0 = match by product string")
 	fs.Parse(args)
@@ -181,8 +194,10 @@ func runProbeSubcommand(args []string) int {
 		mode = lpmeter.ProbeDump
 	case *capture != "":
 		mode = lpmeter.ProbeCapture
+	case *samples:
+		mode = lpmeter.ProbeSamples
 	default:
-		fmt.Fprintln(os.Stderr, "usage: lp700-server probe [-list | -dump | -capture <path> [-duration 10s]] [-vid 0xNNNN -pid 0xNNNN]")
+		fmt.Fprintln(os.Stderr, "usage: lp700-server probe [-list | -dump | -capture <path> [-duration 10s] | -samples [-cycle-modes] [-frames-per-cmd N] [-channel N] [-range NAME]] [-vid 0xNNNN -pid 0xNNNN]")
 		return 2
 	}
 
@@ -190,11 +205,15 @@ func runProbeSubcommand(args []string) int {
 	defer cancel()
 
 	err := lpmeter.RunProbe(ctx, lpmeter.ProbeOptions{
-		Mode:      mode,
-		OutPath:   *capture,
-		Duration:  *duration,
-		VendorID:  uint16(*vid),
-		ProductID: uint16(*pid),
+		Mode:          mode,
+		OutPath:       *capture,
+		Duration:      *duration,
+		VendorID:      uint16(*vid),
+		ProductID:     uint16(*pid),
+		FramesPerCmd:  *framesPerCmd,
+		CycleModes:    *cycleModes,
+		TargetChannel: *targetChannel,
+		TargetRange:   *targetRange,
 	}, os.Stdout)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "probe:", err)

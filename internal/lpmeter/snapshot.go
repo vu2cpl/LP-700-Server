@@ -8,7 +8,39 @@
 // notes.
 package lpmeter
 
-import "time"
+import (
+	"strconv"
+	"time"
+)
+
+// SampleBytes is a []byte that JSON-encodes as an array of unsigned
+// 8-bit integers (e.g. `[151, 151, 0, 8, ...]`) rather than the
+// base64-encoded string Go's default []byte marshaler produces.
+// Scope/spectrum buffers are conceptually arrays of small ints, and
+// clients should be able to read them as such.
+type SampleBytes []byte
+
+// MarshalJSON renders the buffer as a JSON array of decimal u8 values.
+// Hand-written rather than `json.Marshal([]int)` to avoid allocating
+// a separate int slice for every frame (these go on the hot path at
+// the meter's poll rate).
+func (s SampleBytes) MarshalJSON() ([]byte, error) {
+	if s == nil {
+		return []byte("null"), nil
+	}
+	// Each byte renders as 1-3 digits + a comma; 4 chars headroom is
+	// always enough. Plus the surrounding brackets.
+	out := make([]byte, 0, len(s)*4+2)
+	out = append(out, '[')
+	for i, b := range s {
+		if i > 0 {
+			out = append(out, ',')
+		}
+		out = strconv.AppendUint(out, uint64(b), 10)
+	}
+	out = append(out, ']')
+	return out, nil
+}
 
 // Snapshot is the parsed state of the LP-500/700 at a single poll instant.
 // JSON tags define the wire shape sent to clients.
@@ -63,6 +95,42 @@ type Snapshot struct {
 	// internal sanity checks. The hub does not broadcast invalid
 	// snapshots.
 	Valid bool `json:"-"`
+}
+
+// SampleBufferSize is the total length of a scope or spectrum frame:
+// the firmware splits its display buffer across OUT cmds '1'..'5', each
+// returning a 64-byte IN frame whose entire payload is sample data.
+// Concatenated in cmd order they form a single 320-byte buffer.
+// Confirmed empirically 2026-05-15 — see CLAUDE.md "Scope and spectrum
+// sample buffers".
+const SampleBufferSize = 320
+
+// ScopeFrame is a complete envelope-display snapshot, assembled from
+// the 5-segment response to OUT cmds '1'..'5' while the meter is on
+// the waveform LCD page (top_mode == "waveform"). 320 8-bit unsigned
+// samples.
+//
+// Samples are NORMALIZED for the on-meter LCD trace — the firmware
+// auto-scales each trace so the peak fits the display height. They
+// describe the *shape* of the envelope but not absolute watts; for
+// power readings use the matching Snapshot.PowerAvgW / PowerPeakW.
+type ScopeFrame struct {
+	Timestamp   time.Time   `json:"-"`
+	TopMode     string      `json:"top_mode"`     // always "waveform" for HID-backed frames
+	Channel     int         `json:"channel"`      // last decoded telemetry value
+	AutoChannel bool        `json:"auto_channel"` // last decoded telemetry value
+	Samples     SampleBytes `json:"samples"`      // length SampleBufferSize, u8 (marshals as JSON int array)
+}
+
+// SpectrumFrame is a complete FFT-display snapshot, assembled the same
+// way as ScopeFrame but while top_mode == "spectrum". 320 8-bit
+// unsigned magnitudes, normalized to the meter's LCD bar height.
+type SpectrumFrame struct {
+	Timestamp   time.Time   `json:"-"`
+	TopMode     string      `json:"top_mode"` // always "spectrum"
+	Channel     int         `json:"channel"`
+	AutoChannel bool        `json:"auto_channel"`
+	Bins        SampleBytes `json:"bins"` // length SampleBufferSize, u8 (marshals as JSON int array)
 }
 
 // CloseEnough returns true if two snapshots are equivalent for broadcast

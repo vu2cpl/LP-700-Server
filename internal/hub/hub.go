@@ -19,6 +19,8 @@ type Hub struct {
 	upgrader     websocket.Upgrader
 	source       lpmeter.Source
 	snapIn       <-chan lpmeter.Snapshot
+	scopeIn      <-chan lpmeter.ScopeFrame    // nil → scope broadcast disabled
+	spectrumIn   <-chan lpmeter.SpectrumFrame // nil → spectrum broadcast disabled
 	register     chan *client
 	unregister   chan *client
 	resync       chan *client
@@ -45,7 +47,7 @@ type Options struct {
 	AllowControl bool
 }
 
-func NewHub(snapIn <-chan lpmeter.Snapshot, source lpmeter.Source, opts Options, logger *slog.Logger) *Hub {
+func NewHub(snapIn <-chan lpmeter.Snapshot, scopeIn <-chan lpmeter.ScopeFrame, spectrumIn <-chan lpmeter.SpectrumFrame, source lpmeter.Source, opts Options, logger *slog.Logger) *Hub {
 	return &Hub{
 		upgrader: websocket.Upgrader{
 			// LAN-only deployment per ARCHITECTURE.md §2; any origin is accepted.
@@ -53,6 +55,8 @@ func NewHub(snapIn <-chan lpmeter.Snapshot, source lpmeter.Source, opts Options,
 		},
 		source:       source,
 		snapIn:       snapIn,
+		scopeIn:      scopeIn,
+		spectrumIn:   spectrumIn,
 		register:     make(chan *client, 16),
 		unregister:   make(chan *client, 16),
 		resync:       make(chan *client, 16),
@@ -137,6 +141,26 @@ func (h *Hub) Run(ctx context.Context) {
 			lastSnap = &snap
 			lastJSON = data
 			lastSent = time.Now()
+			h.broadcast(clients, data)
+
+		case scope := <-h.scopeIn:
+			// Scope frames change every assembly cycle by design —
+			// CloseEnough-style dedup doesn't apply. Heartbeat
+			// suppression also doesn't apply (lastSent is for
+			// telemetry); scope traffic stays on its own cadence.
+			data, err := encodeScope(scope, h.seq.Add(1))
+			if err != nil {
+				h.logger.Error("encode scope", "err", err)
+				continue
+			}
+			h.broadcast(clients, data)
+
+		case spec := <-h.spectrumIn:
+			data, err := encodeSpectrum(spec, h.seq.Add(1))
+			if err != nil {
+				h.logger.Error("encode spectrum", "err", err)
+				continue
+			}
 			h.broadcast(clients, data)
 
 		case <-hb.C:
@@ -315,5 +339,23 @@ func encodeHeartbeat(seq uint64) ([]byte, error) {
 		"type": "heartbeat",
 		"seq":  seq,
 		"ts":   time.Now().UTC().Format(time.RFC3339Nano),
+	})
+}
+
+func encodeScope(s lpmeter.ScopeFrame, seq uint64) ([]byte, error) {
+	return json.Marshal(map[string]any{
+		"type": "scope",
+		"seq":  seq,
+		"ts":   s.Timestamp.Format(time.RFC3339Nano),
+		"data": s,
+	})
+}
+
+func encodeSpectrum(s lpmeter.SpectrumFrame, seq uint64) ([]byte, error) {
+	return json.Marshal(map[string]any{
+		"type": "spectrum",
+		"seq":  seq,
+		"ts":   s.Timestamp.Format(time.RFC3339Nano),
+		"data": s,
 	})
 }

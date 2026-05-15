@@ -153,13 +153,21 @@ Mirrors the LP-500/700 **Power/SWR** screen — Avg power, Peak power, SWR,
 channel pills (Auto / 1..4), range cycle, Peak/Avg/Tune buttons, alarm
 enable/tripped indicator.
 
-The Waveform/'Scope and Spectrum modes are *not* mirrored to the web UI;
-the `mode_step` verb (still accepted on `/ws`) cycles the meter's on-LCD
-display so an operator can switch into them remotely if needed. Numeric
-alarm thresholds, callsign, coupler model, and firmware revision live in
-the meter's NVRAM and aren't transmitted via USB at all (confirmed by USB
-pcap audit — see [CLAUDE.md](CLAUDE.md)) so those rows are absent from
-the UI.
+The Waveform/'Scope and Spectrum modes are *not* mirrored to the web UI
+(the Mac client in [LP-700-App](https://github.com/VU3ESV/LP-700-App)
+renders them); the `mode_step` verb (still accepted on `/ws`) cycles
+the meter's on-LCD display so an operator can switch into them remotely
+if needed. While the meter is on the waveform or spectrum LCD page, the
+server emits `{"type":"scope"}` / `{"type":"spectrum"}` WebSocket
+frames at ~4 Hz alongside the regular `telemetry` stream — each carries
+a 320-element 8-bit array assembled from the firmware's cmd-`'1'`..`'5'`
+segments (see [CLAUDE.md](CLAUDE.md) "Scope and spectrum sample
+buffers" and [ARCHITECTURE.md](ARCHITECTURE.md) §4).
+
+Numeric alarm thresholds, callsign, coupler model, and firmware
+revision live in the meter's NVRAM and aren't transmitted via USB at
+all (confirmed by USB pcap audit — see [CLAUDE.md](CLAUDE.md)) so
+those rows are absent from the UI.
 
 ## Operations cheatsheet
 
