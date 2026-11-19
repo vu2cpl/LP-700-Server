@@ -75,8 +75,8 @@ func TestIsCommandEcho(t *testing.T) {
 }
 
 func TestIsLikelyTelemetry(t *testing.T) {
-	// Valid telemetry frame: peak_power >= avg_power, all header
-	// bytes in range. Use buildSyntheticFrame and patch peak > avg.
+	// Valid telemetry frame: header bytes in range, full scale set
+	// (buildSyntheticFrame writes it from the range).
 	valid := buildSyntheticFrame(Snapshot{
 		Channel: 2, AutoChannel: false,
 		Range:        "100W",
@@ -125,6 +125,48 @@ func TestIsLikelyTelemetry(t *testing.T) {
 		t.Error("all-zero frame is not a command echo (byte 0 is not a cmd char)")
 	}
 
+	// Key-down sample segments captured on the waveform and spectrum
+	// pages (bench, 2026-11-19): a long zero run, then a small ramp in
+	// the last bytes. Every header byte is 0, peak 0 >= avg 0 and the
+	// SWR is 0, so only the full-scale check (bytes 30-31 = 0) stops
+	// them. Before it, each decoded as power_swr / CH Auto / 5W and
+	// clients flashed the Power/SWR page whenever the carrier came up.
+	for _, h := range []string{
+		"00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101020303030404040505060606",
+		"00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000102020303030404050505060606070707",
+		"000000000000000000000000000000000000000000000000000000000000000000000000000000000102020303030404050505060606070707080809090a0a0b",
+		"00000000000000000000000000000000000000000000000000000000000000000000000000000000010101013630003630000000000103050902010001050000",
+	} {
+		seg, err := hex.DecodeString(h)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if isLikelyTelemetry(seg) {
+			t.Errorf("captured key-down sample segment %s… must fail isLikelyTelemetry", h[80:])
+		}
+	}
+
+	// Real telemetry captured just after key-up (bench, 2026-11-19).
+	// The live peak (bytes 23-24) has already fallen below the rolling
+	// average (25-26). A "peak >= avg" rule used to reject these, which
+	// froze Avg for over a second after every key-up on the Power/SWR
+	// page and cost a scope cycle on the waveform page.
+	for _, tc := range []struct{ name, hex, page string }{
+		{"Power/SWR, peak 0 W, avg 2.4 W", "0022000000010b010000010200000900000001020400000000000c35022a00140000000000990000e37b06b784", "power_swr"},
+		{"Waveform, peak 2.8 W, avg 3.0 W", "0022000100010b01000001020000090000000102040002000e000f1d013000140000000000990000e37b06b784", "waveform"},
+	} {
+		b, err := hex.DecodeString(tc.hex + strings.Repeat("00", ReportSize-len(tc.hex)/2))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !isLikelyTelemetry(b) {
+			t.Errorf("%s: real key-up telemetry must pass isLikelyTelemetry", tc.name)
+		}
+		if snap, err := Decode(b); err != nil || snap.TopMode != tc.page || snap.PowerPeakW >= snap.PowerAvgW {
+			t.Errorf("%s: decoded as %+v, err %v; want %s with peak < avg", tc.name, snap, err, tc.page)
+		}
+	}
+
 	// Real telemetry captured on the waveform page (2026-11-19, LP-700,
 	// LCD on CH 4, Power/SWR in CH Auto): top_mode 1, byte 4 = 0,
 	// byte 5 = 4, range 11 (auto), SWR raw 999. Must still pass.
@@ -146,10 +188,10 @@ func TestIsLikelyTelemetry(t *testing.T) {
 
 	// Spectrum cmd '5' tail with sparse small bytes: all header
 	// invariants pass by accident, but byte 7 (alarm-DISABLED) is
-	// out of {0,1} and/or peak < avg. This is the actual leak path
-	// observed in production 2026-05-16 (14 peak<avg incidents in 20s
-	// before the byte-7 + peak/avg checks were added).
+	// out of {0,1}. This is the leak path observed in production
+	// 2026-05-16. Full scale set so the byte-7 rule is what rejects it.
 	leak := make([]byte, ReportSize)
+	leak[30], leak[31] = 0x00, 0x0a
 	leak[3] = 2 // top_mode in range
 	leak[4] = 1 // channel in range
 	leak[5] = 1 // channel-auto in range
@@ -160,8 +202,9 @@ func TestIsLikelyTelemetry(t *testing.T) {
 		t.Error("sample frame with byte 7 = 3 must fail isLikelyTelemetry (alarm flag is 0/1 only)")
 	}
 
-	// Same shape but byte 7 happens to be 0 or 1. Then peak<avg
-	// catches it.
+	// Same shape but byte 7 happens to be 0 or 1, and peak < avg. The
+	// old "peak >= avg" rule caught this; the full scale (bytes 30-31
+	// = 0, not a range step) catches it now.
 	peakLessAvg := make([]byte, ReportSize)
 	peakLessAvg[3], peakLessAvg[4], peakLessAvg[5] = 2, 1, 1
 	peakLessAvg[6] = 4
@@ -173,7 +216,7 @@ func TestIsLikelyTelemetry(t *testing.T) {
 	peakLessAvg[25] = 0x05
 	peakLessAvg[26] = 0x00
 	if isLikelyTelemetry(peakLessAvg) {
-		t.Error("frame with peak (1) < avg (1280) must fail isLikelyTelemetry")
+		t.Error("sample-shaped frame with full scale 0 must fail isLikelyTelemetry")
 	}
 
 	// All header bytes in range, peak >= avg, but SWR raw above the
@@ -187,7 +230,8 @@ func TestIsLikelyTelemetry(t *testing.T) {
 	swrLeak[7] = 1
 	swrLeak[8] = 0
 	swrLeak[23], swrLeak[24] = 0x00, 0x05 // peak raw 5
-	swrLeak[25], swrLeak[26] = 0x00, 0x05 // avg raw 5 (peak == avg ok)
+	swrLeak[25], swrLeak[26] = 0x00, 0x05 // avg raw 5
+	swrLeak[30], swrLeak[31] = 0x00, 0x0a // full scale 5 W, valid
 	if isLikelyTelemetry(swrLeak) {
 		t.Error("frame with SWR raw > 1000 must fail isLikelyTelemetry")
 	}

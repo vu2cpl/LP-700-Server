@@ -199,10 +199,10 @@ func (o *HIDOwner) runOnce(ctx context.Context) error {
 	//   1. ECHO     — byte[0] in cmd-char range AND bytes 1..63 zero.
 	//                 Firmware refused the OUT (wrong LCD page or no-op
 	//                 in current state). Drop.
-	//   2. TELEMETRY — non-echo, not all-zero, AND satisfies tight
-	//                  byte-range invariants (byte 3 ≤ 3, byte 4 ≤ 4,
-	//                  etc.). Probability a random sample frame passes
-	//                  all five invariants ≈ 10⁻¹⁰. Run through Decode.
+	//   2. TELEMETRY — non-echo, bytes 30-31 hold one of the meter's 11
+	//                  full-scale values, AND the header bytes are in
+	//                  range (byte 3 ≤ 3, byte 4 ≤ 4, etc.). See
+	//                  isLikelyTelemetry. Run through Decode.
 	//   3. SAMPLE   — non-echo, fails telemetry invariants. In
 	//                  waveform/spectrum mode this is the next segment
 	//                  of the 5×64-byte buffer; assemble in arrival
@@ -439,50 +439,65 @@ func isCommandEcho(frame []byte) bool {
 	return true
 }
 
-// isAllZero reports whether every byte of the frame is zero.
-func isAllZero(frame []byte) bool {
-	for _, b := range frame {
-		if b != 0 {
-			return false
+// fullScaleHalfWatts lists the values bytes 30-31 of a telemetry frame
+// can hold: the active bargraph full scale in half-watts. The Range key
+// steps the bargraph "between 5W and 10KW in 11 steps" (LP-500 user
+// guide v5.4); these are those steps, rangeNames without "auto". Auto
+// range picks one of them too.
+var fullScaleHalfWatts = [...]uint16{10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000}
+
+// validFullScale reports whether raw (bytes 30-31) is one of the
+// meter's full-scale values. See isLikelyTelemetry for why this is the
+// check that tells telemetry from sample segments.
+func validFullScale(raw uint16) bool {
+	for _, v := range fullScaleHalfWatts {
+		if raw == v {
+			return true
 		}
 	}
-	return true
+	return false
 }
 
-// isLikelyTelemetry reports whether a 64-byte IN frame's structure
-// matches a real telemetry response from cmd '0' or '6': specifically
-// that the header-byte ranges that the Decode function later relies on
-// are all within their valid intervals. Sample frames (from cmds
-// '1'..'5' in waveform/spectrum mode) place arbitrary 8-bit sample
-// data at these offsets, so the chance of all five passing on a sample
-// frame is the product of each range's relative width — under 10⁻¹⁰
-// for random data, slightly higher in pathological correlated cases
-// but never observed empirically on the LP-700 firmware.
+// isLikelyTelemetry reports whether a 64-byte IN frame is a telemetry
+// reply to cmd '0' or '6' rather than a sample segment from cmds
+// '1'..'5' on the waveform / spectrum pages. The frame is judged by its
+// own bytes, not by the OUT it followed: after a control verb the meter
+// goes quiet for ~250 ms and then delivers several replies at once.
 //
-// This is the key defense against sample frames leaking into the
-// telemetry decode path. It is intentionally STRICTER than what
-// Decode itself enforces, because Decode would also accept some
-// sample frames (those that happen to have all 5 header bytes in
-// range with garbage payload values) and broadcast garbage Snapshots.
+// Sample segments are not random bytes. They are 64 consecutive points
+// of a smooth envelope or spectrum: all zero while idle, and a long
+// zero run ending in a small ramp at key-down. Small values pass every
+// header range check below, so those checks alone let such segments
+// through. The check that separates the two is the full scale in bytes
+// 30-31 (see validFullScale): a real frame always holds one of 11 exact
+// values there, and a sample segment holds two neighbouring samples,
+// which is 0 for an idle or key-down segment and practically never one
+// of those 11 numbers otherwise. On the 2026-11-19 bench captures
+// (Power/SWR, Waveform and Spectrum pages, carrier keyed and unkeyed)
+// it rejected no real frame and accepted no sample segment.
 //
-// An all-zero frame is never telemetry. It is what the meter returns
-// for a waveform sample segment when there is no carrier, and every
-// byte-range check below accepts it (0 is in range everywhere, and
-// peak 0 ≥ avg 0). Decoded, it reads as power_swr / CH Auto / 5W /
-// SWR 1.00, so before this check the run loop flipped lastTopMode to
-// power_swr on every idle segment, polled cmd '0' again on the next
-// tick, saw waveform, and never completed a sample cycle: clients saw
-// top_mode / channel / range / SWR flap every frame and no scope
-// frames (bench, 2026-11-19, v0.2.6). Real telemetry carries non-zero
-// bytes (the captured waveform-page frame has the full-scale bytes
-// 30-31 = 0x000a and the bargraph scaling at 27-29 set), and an
-// all-zero frame would decode to nothing meaningful anyway, so
-// rejecting it costs at most one dropped frame.
+// What it replaced, all found on that bench:
+//   - An idle (all-zero) segment decoded as power_swr / CH Auto / 5W /
+//     SWR 1.00. The run loop flipped lastTopMode, polled cmd '0' again,
+//     and never finished a sample cycle, so top_mode flapped every
+//     frame and no scope frames went out.
+//   - A key-down segment (zeros, then a ramp in the last bytes) decoded
+//     the same way, so clients briefly saw the Power/SWR page on the
+//     waveform page each time the carrier came up.
+//   - A "peak >= avg" check rejected real frames. Bytes 23-24 are the
+//     live envelope peak of this poll. It falls to 0 at key-up while
+//     the rolling average in 25-26 is still decaying, and dips below
+//     the average during TX. That check dropped 163 of 1205 real frames:
+//     Avg froze for over a second after each key-up on the Power/SWR
+//     page, and on the waveform page each dropped '0' reply cost a
+//     whole scope cycle.
+//
+// The range checks below still keep Decode's table lookups in range.
 func isLikelyTelemetry(frame []byte) bool {
 	if len(frame) != ReportSize {
 		return false
 	}
-	if isAllZero(frame) {
+	if !validFullScale(binary.BigEndian.Uint16(frame[OffsetPwrMultHi : OffsetPwrMultHi+2])) {
 		return false
 	}
 	if frame[OffsetTopMode] > 3 {
@@ -502,18 +517,6 @@ func isLikelyTelemetry(frame []byte) bool {
 		return false
 	}
 	if int(frame[OffsetPeakAvg]) >= len(peakModeNames) {
-		return false
-	}
-	// Power coherence: in real telemetry frames the firmware
-	// guarantees peak_power >= avg_power (peak is a max-hold over a
-	// short window, avg is a rolling integration over the same or
-	// longer window). Sample frames place arbitrary u8 sample values
-	// at these offsets and routinely violate this invariant — the
-	// remaining "peak < avg" leakage past the byte-range checks falls
-	// into this filter.
-	rawPeak := binary.BigEndian.Uint16(frame[OffsetPeakPwrHi : OffsetPeakPwrHi+2])
-	rawAvg := binary.BigEndian.Uint16(frame[OffsetAvgPwrHi : OffsetAvgPwrHi+2])
-	if rawPeak < rawAvg {
 		return false
 	}
 	// SWR sanity: raw SWR is a 16-bit fixed-point /100 value. The

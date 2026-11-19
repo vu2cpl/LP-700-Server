@@ -24,9 +24,17 @@ func buildSyntheticFrame(s Snapshot) []byte {
 	r[OffsetSWRHi] = byte(rawSWR >> 8)
 	r[OffsetSWRLo] = byte(rawSWR & 0xff)
 
+	// Bytes 30-31: the active full scale in half-watts. The meter always
+	// writes one of its 11 range steps here, and Auto range picks one
+	// too (5 W when idle), so isLikelyTelemetry requires it.
+	fullScale := fullScaleHalfWatts[0]
 	if i := indexOf(rangeNames, s.Range); i >= 0 {
 		r[OffsetRange] = byte(i)
+		if i < len(fullScaleHalfWatts) {
+			fullScale = fullScaleHalfWatts[i]
+		}
 	}
+	binary.BigEndian.PutUint16(r[OffsetPwrMultHi:], fullScale)
 	if s.AutoChannel {
 		r[OffsetChannel] = 0
 		if s.Channel >= 1 && s.Channel <= 4 {

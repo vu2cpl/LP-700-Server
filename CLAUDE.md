@@ -212,11 +212,10 @@ classifies each IN frame on its own merits — three classes:
 1. **Echo** — `byte[0]` in `'0'..'?'` AND every other byte zero.
    Firmware refused the OUT (wrong LCD page, or no-op verb in the
    current state). Dropped.
-2. **Telemetry** — not all-zero, and passes a tight byte-range
-   structural check (`isLikelyTelemetry` in `owner.go`): `byte 3 ≤ 3`,
-   `byte 4 ≤ 4`, `byte 5 ≤ 4`, `byte 6 ≤ 11`, `byte 8 ≤ 2`, plus the
-   alarm-flag, peak ≥ avg and SWR caps. Random sample data passes the
-   five range checks with probability ≈ 10⁻¹⁰. Decoded as a Snapshot
+2. **Telemetry** — bytes 30-31 hold one of the meter's 11 full-scale
+   values, and the header bytes are in range (`isLikelyTelemetry` in
+   `owner.go`): `byte 3 ≤ 3`, `byte 4 ≤ 4`, `byte 5 ≤ 4`, `byte 6 ≤ 11`,
+   `byte 8 ≤ 2`, alarm flag 0/1, SWR raw ≤ 1000. Decoded as a Snapshot
    and broadcast.
 3. **Sample** — everything else. Assembled into the scope/spectrum
    buffer in arrival order (segment index advances per frame,
@@ -224,18 +223,29 @@ classifies each IN frame on its own merits — three classes:
    change). Emitted as a `scope` or `spectrum` WS frame after
    segment 5.
 
-**Idle sample segments are 64 zero bytes.** With no carrier, the
-meter answers a waveform sample cmd with an all-zero frame, and an
-all-zero frame passes every range check (0 is in range everywhere,
-peak 0 ≥ avg 0). Until the all-zero rule was added, each idle segment
-decoded as power_swr / CH Auto / 5W / SWR 1.00, flipped `lastTopMode`
-to power_swr, and sent the next tick back to cmd `'0'`. Clients saw
-top_mode, channel, range and SWR alternate every frame on the
-waveform page and never got a `scope` frame (bench, 2026-11-19,
-v0.2.6). `TestIsLikelyTelemetry` pins the zero frame as non-telemetry
-and a captured real waveform-page frame as telemetry. Random data is
-not the threat model for this classifier; low-entropy sample frames
-are. Treat any new "flapping" report as a classifier leak first.
+**The full scale is what tells telemetry from samples.** Bytes 30-31
+are the active bargraph full scale in half-watts, and the Range key
+only has the 11 steps from 5 W to 10 kW (LP-500 guide v5.4), which
+Auto range also picks from. So a real frame always carries one of 11
+exact values (`fullScaleHalfWatts`). Sample segments are smooth, not
+random: an idle segment is 64 zero bytes, and a key-down segment is a
+long zero run ending in a small ramp. Both pass every header range
+check, and both have 0 in bytes 30-31. Before the full-scale check,
+each of them decoded as power_swr / CH Auto / 5W / SWR 1.00 and flipped
+`lastTopMode`: idle segments made top_mode, channel, range and SWR
+alternate every frame on the waveform page with no `scope` frames, and
+key-down segments flashed the Power/SWR page in clients whenever the
+carrier came up (bench, 2026-11-19, v0.2.6). Treat any new "flapping"
+or "flashes other pages" report as a classifier leak first.
+
+**Never test peak ≥ avg.** Bytes 23-24 are the live envelope peak of
+this poll. They fall to 0 at key-up while the rolling average in
+25-26 is still decaying, and dip below it during TX. A "peak ≥ avg"
+rule used to run here and rejected 163 of 1,205 real frames on the same
+bench: Avg froze for over a second after every key-up on the Power/SWR
+page, and each dropped `'0'` reply on the waveform page cost a whole
+scope cycle. `TestIsLikelyTelemetry` pins captured key-down segments
+as samples and captured key-up frames (peak < avg) as telemetry.
 
 An earlier implementation matched IN frames to OUT cmds via a write-
 order FIFO. That approach desyncs on any single missed event (stale
