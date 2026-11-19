@@ -197,6 +197,11 @@ troubleshooting: [docs/REVERSE-PROXY.md](docs/REVERSE-PROXY.md).
 | `/api/log-level` | GET / POST the running slog level (`error`/`warn`/`info`/`debug`)                        |
 | `/api/update`    | GET — cached result of the GitHub release check (see [Updates](#updates))                |
 
+`telemetry` frames go out when a reading changes by more than a small
+deadband (0.5 W on power). A smaller change, such as the last step from
+0.2 W to 0 W after key-up, follows within 500 ms, so clients always end on
+the meter's settled value.
+
 Smoke test from the command line:
 
 ```sh

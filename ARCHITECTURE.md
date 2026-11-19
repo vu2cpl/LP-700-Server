@@ -93,7 +93,10 @@ frames carry a monotonic `seq` so clients can detect drops.
 **Server → client**
 
 ```json
-// On connect, then on every changed field.
+// On connect, then whenever a field changes by more than the deadband
+// (0.5 W on power, 0.005 on SWR; any change for the other fields).
+// A smaller change still goes out within 500 ms (trailing flush), so
+// the settled value, e.g. 0 W after key-up, always arrives.
 {
   "type": "telemetry",
   "seq": 12345,

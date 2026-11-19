@@ -15,6 +15,19 @@ import (
 
 const sendBuffer = 32
 
+// trailingFlush is how often the hub checks for a reading that CloseEnough
+// held back. CloseEnough compares a snapshot with the last one sent, with
+// a 0.5 W deadband, and the meter's power moves in 0.2 W steps (0.018 W
+// on the Spectrum page). So after key-up the average can stop at 0.2 or
+// 0.4 W in the last frame sent, and the final 0 W is never sent: clients,
+// and every resync or new client, stay on the stale value until something
+// else changes (bench, 2026-11-19: the meter read 0 W for minutes while
+// clients showed 0.2 W). Every trailingFlush the hub sends the newest
+// snapshot if it differs from the last one sent, so a settled reading
+// always reaches clients within this time. While idle nothing differs,
+// so nothing extra is sent; while keyed it adds at most 2 frames/s.
+const trailingFlush = 500 * time.Millisecond
+
 type Hub struct {
 	upgrader     websocket.Upgrader
 	source       lpmeter.Source
@@ -25,6 +38,7 @@ type Hub struct {
 	unregister   chan *client
 	resync       chan *client
 	heartbeat    time.Duration
+	flushEvery   time.Duration // trailingFlush; shorter in tests
 	maxClients   int
 	allowControl bool
 	logger       *slog.Logger
@@ -62,6 +76,7 @@ func NewHub(snapIn <-chan lpmeter.Snapshot, scopeIn <-chan lpmeter.ScopeFrame, s
 		unregister:   make(chan *client, 16),
 		resync:       make(chan *client, 16),
 		heartbeat:    opts.Heartbeat,
+		flushEvery:   trailingFlush,
 		maxClients:   opts.MaxClients,
 		allowControl: opts.AllowControl,
 		logger:       logger,
@@ -74,10 +89,28 @@ func (h *Hub) Run(ctx context.Context) {
 	clients := make(map[*client]struct{})
 	var lastJSON []byte
 	var lastSnap *lpmeter.Snapshot
+	// heldBack is the newest valid snapshot that CloseEnough kept from
+	// going out, or nil when the last one sent is the newest.
+	var heldBack *lpmeter.Snapshot
 	lastSent := time.Now()
 
 	hb := time.NewTicker(h.heartbeat)
 	defer hb.Stop()
+	flush := time.NewTicker(h.flushEvery)
+	defer flush.Stop()
+
+	sendTelemetry := func(snap lpmeter.Snapshot) {
+		data, err := encodeTelemetry(snap, h.seq.Add(1))
+		if err != nil {
+			h.logger.Error("encode telemetry", "err", err)
+			return
+		}
+		lastSnap = &snap
+		lastJSON = data
+		lastSent = time.Now()
+		heldBack = nil
+		h.broadcast(clients, data)
+	}
 
 	closeAll := func() {
 		for c := range clients {
@@ -132,17 +165,22 @@ func (h *Hub) Run(ctx context.Context) {
 			snapCopy := snap
 			h.latestSnap.Store(&snapCopy)
 			if lastSnap != nil && lastSnap.CloseEnough(snap) {
+				heldBack = &snapCopy
 				continue
 			}
-			data, err := encodeTelemetry(snap, h.seq.Add(1))
-			if err != nil {
-				h.logger.Error("encode telemetry", "err", err)
+			sendTelemetry(snap)
+
+		case <-flush.C:
+			// See trailingFlush: send a held-back reading so a value
+			// inside the deadband (0.2 W → 0 W at key-up) still arrives.
+			if heldBack == nil {
 				continue
 			}
-			lastSnap = &snap
-			lastJSON = data
-			lastSent = time.Now()
-			h.broadcast(clients, data)
+			if lastSnap != nil && lastSnap.SameReadings(*heldBack) {
+				heldBack = nil
+				continue
+			}
+			sendTelemetry(*heldBack)
 
 		case scope := <-h.scopeIn:
 			// Scope frames change every assembly cycle by design —
