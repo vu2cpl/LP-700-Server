@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 )
@@ -172,6 +173,46 @@ func TestDecodeSamplePageChannelIsNeverAuto(t *testing.T) {
 	}
 	if !got.AutoChannel || got.Channel != 2 {
 		t.Errorf("power_swr page: got auto=%v ch=%d, want auto=true ch=2", got.AutoChannel, got.Channel)
+	}
+}
+
+// The Spectrum page carries its "Pwr" readout in 0.018 W steps. Frame
+// captured on the LP-700 (2026-11-19) while the LCD showed 5 W / +37 dBm;
+// the second case sets the raw value seen while it showed 185 W / +52 dBm.
+func TestDecodeSpectrumPowerScale(t *testing.T) {
+	const captured = "011e000200010501020001000000090000000102050100011e000001002a01f40200000000740000e37b06b784"
+	frame, err := hex.DecodeString(captured + strings.Repeat("00", ReportSize-len(captured)/2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	near := func(got, want float64) bool { return math.Abs(got-want) < 0.01 }
+
+	got, err := Decode(frame)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.TopMode != "spectrum" || !near(got.PowerPeakW, 5.148) || !near(got.PeakHoldW, 5.148) {
+		t.Errorf("5 W case: got top=%s peak=%.3f hold=%.3f, want spectrum 5.148 5.148",
+			got.TopMode, got.PowerPeakW, got.PeakHoldW)
+	}
+
+	binary.BigEndian.PutUint16(frame[OffsetPeakPwrHi:], 10303)
+	got, err = Decode(frame)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !near(got.PowerPeakW, 185.454) {
+		t.Errorf("185 W case: got peak=%.3f, want 185.454", got.PowerPeakW)
+	}
+
+	// The same bytes on the Waveform page keep the 0.2 W scale.
+	frame[OffsetTopMode] = 1
+	got, err = Decode(frame)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.TopMode != "waveform" || !near(got.PowerPeakW, 2060.6) {
+		t.Errorf("waveform page: got top=%s peak=%.1f, want waveform 2060.6", got.TopMode, got.PowerPeakW)
 	}
 }
 

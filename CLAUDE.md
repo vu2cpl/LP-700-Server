@@ -247,6 +247,16 @@ page, and each dropped `'0'` reply on the waveform page cost a whole
 scope cycle. `TestIsLikelyTelemetry` pins captured key-down segments
 as samples and captured key-up frames (peak < avg) as telemetry.
 
+**The Spectrum page has its own power scale.** There the meter shows one
+power readout ("Pwr", total peak power summed over the frequency bins,
+plus dBm), and bytes 0-1 / 23-24 carry it in 0.018 W steps, not 0.2 W:
+raw ≈ 10300 when the LCD showed 185 W / +52 dBm, raw ≈ 286 at 5 W /
++37 dBm (bench 2026-11-19; the LCD drops decimals). Bytes 25-26 (average)
+stay 0 on that page and bytes 2 / 37 are not SWR there (1.16-1.29 while
+the other pages read 1.55). `Decode` applies `spectrumWattsPerStep`;
+clients show only the peak (as Pwr + dBm) on the Spectrum page.
+`TestDecodeSpectrumPowerScale` pins it.
+
 An earlier implementation matched IN frames to OUT cmds via a write-
 order FIFO. That approach desyncs on any single missed event (stale
 kernel-buffered frame at HID open, an unsolicited firmware frame on
