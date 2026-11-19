@@ -212,16 +212,50 @@ classifies each IN frame on its own merits — three classes:
 1. **Echo** — `byte[0]` in `'0'..'?'` AND every other byte zero.
    Firmware refused the OUT (wrong LCD page, or no-op verb in the
    current state). Dropped.
-2. **Telemetry** — passes a tight byte-range structural check
-   (`isLikelyTelemetry` in `owner.go`): `byte 3 ≤ 3`, `byte 4 ≤ 4`,
-   `byte 5 ≤ 4`, `byte 6 ≤ 11`, `byte 8 ≤ 2`. Random sample data
-   passes all five with probability ≈ 10⁻¹⁰. Decoded as a Snapshot
+2. **Telemetry** — bytes 30-31 hold one of the meter's 11 full-scale
+   values, and the header bytes are in range (`isLikelyTelemetry` in
+   `owner.go`): `byte 3 ≤ 3`, `byte 4 ≤ 4`, `byte 5 ≤ 4`, `byte 6 ≤ 11`,
+   `byte 8 ≤ 2`, alarm flag 0/1, SWR raw ≤ 1000. Decoded as a Snapshot
    and broadcast.
 3. **Sample** — everything else. Assembled into the scope/spectrum
    buffer in arrival order (segment index advances per frame,
    resets to 0 on every telemetry frame and on every top-mode
    change). Emitted as a `scope` or `spectrum` WS frame after
    segment 5.
+
+**The full scale is what tells telemetry from samples.** Bytes 30-31
+are the active bargraph full scale in half-watts, and the Range key
+only has the 11 steps from 5 W to 10 kW (LP-500 guide v5.4), which
+Auto range also picks from. So a real frame always carries one of 11
+exact values (`fullScaleHalfWatts`). Sample segments are smooth, not
+random: an idle segment is 64 zero bytes, and a key-down segment is a
+long zero run ending in a small ramp. Both pass every header range
+check, and both have 0 in bytes 30-31. Before the full-scale check,
+each of them decoded as power_swr / CH Auto / 5W / SWR 1.00 and flipped
+`lastTopMode`: idle segments made top_mode, channel, range and SWR
+alternate every frame on the waveform page with no `scope` frames, and
+key-down segments flashed the Power/SWR page in clients whenever the
+carrier came up (bench, 2026-11-19, v0.2.6). Treat any new "flapping"
+or "flashes other pages" report as a classifier leak first.
+
+**Never test peak ≥ avg.** Bytes 23-24 are the live envelope peak of
+this poll. They fall to 0 at key-up while the rolling average in
+25-26 is still decaying, and dip below it during TX. A "peak ≥ avg"
+rule used to run here and rejected 163 of 1,205 real frames on the same
+bench: Avg froze for over a second after every key-up on the Power/SWR
+page, and each dropped `'0'` reply on the waveform page cost a whole
+scope cycle. `TestIsLikelyTelemetry` pins captured key-down segments
+as samples and captured key-up frames (peak < avg) as telemetry.
+
+**The Spectrum page has its own power scale.** There the meter shows one
+power readout ("Pwr", total peak power summed over the frequency bins,
+plus dBm), and bytes 0-1 / 23-24 carry it in 0.018 W steps, not 0.2 W:
+raw ≈ 10300 when the LCD showed 185 W / +52 dBm, raw ≈ 286 at 5 W /
++37 dBm (bench 2026-11-19; the LCD drops decimals). Bytes 25-26 (average)
+stay 0 on that page and bytes 2 / 37 are not SWR there (1.16-1.29 while
+the other pages read 1.55). `Decode` applies `spectrumWattsPerStep`;
+clients show only the peak (as Pwr + dBm) on the Spectrum page.
+`TestDecodeSpectrumPowerScale` pins it.
 
 An earlier implementation matched IN frames to OUT cmds via a write-
 order FIFO. That approach desyncs on any single missed event (stale
@@ -235,13 +269,24 @@ frame and avoids the entire class of bugs. (See
 LP-700-App-side post-mortem for the symptom catalog this fix
 addresses.)
 
-**Gates on emit.** Scope and spectrum frames are only broadcast
-when the meter is on a manual channel (`channel ∈ {1..4}` AND
-`auto_channel == false`). Auto-channel × waveform/spectrum is a
-hardware-invalid combination on the LP-700 firmware; the sample
-buffers in that state are indeterminate and would render as garbage.
-Operators must `channel_step` to a manual channel before the scope/
-spectrum view becomes meaningful.
+**The Waveform and Spectrum pages have their own channel, never
+Auto.** LP-500 user guide v5.4: "CH Auto is not offered in the 'scope
+mode … The channel selection for the 'scope mode is independent of the
+Power/SWR mode" (same wording for Spectrum). On those pages byte 5
+carries that page's CH 1..4, and byte 4 does not mean Auto: on the
+bench (LP-700, 2026-11-19, Power/SWR in CH Auto) CH presses on the
+waveform/spectrum page moved byte 5 4 → 1 → 2 with the LCD showing the
+same channel, while byte 4 stayed 0. `Decode` therefore reports
+`auto_channel: false` and `channel` = byte 5 whenever `top_mode` is
+waveform or spectrum (`TestDecodeSamplePageChannelIsNeverAuto`). On
+these pages F2 (`channel_step`) cycles CH 1 → 2 → 3 → 4 → 1.
+
+**Gates on emit.** Scope and spectrum frames are only broadcast with
+`channel ∈ {1..4}` AND `auto_channel == false`. Since `Decode` never
+reports Auto on these pages, this is now only a guard against
+out-of-range channel bytes. It used to read byte 4 as Auto on these
+pages, which suppressed every scope/spectrum frame whenever the
+Power/SWR page was left in CH Auto.
 
 **Sample rate / time base not yet measured.** Phase 1 reverse-
 engineering captured uniform buffers (steady carrier into dummy

@@ -2,7 +2,9 @@ package lpmeter
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 )
@@ -23,9 +25,17 @@ func buildSyntheticFrame(s Snapshot) []byte {
 	r[OffsetSWRHi] = byte(rawSWR >> 8)
 	r[OffsetSWRLo] = byte(rawSWR & 0xff)
 
+	// Bytes 30-31: the active full scale in half-watts. The meter always
+	// writes one of its 11 range steps here, and Auto range picks one
+	// too (5 W when idle), so isLikelyTelemetry requires it.
+	fullScale := fullScaleHalfWatts[0]
 	if i := indexOf(rangeNames, s.Range); i >= 0 {
 		r[OffsetRange] = byte(i)
+		if i < len(fullScaleHalfWatts) {
+			fullScale = fullScaleHalfWatts[i]
+		}
 	}
+	binary.BigEndian.PutUint16(r[OffsetPwrMultHi:], fullScale)
 	if s.AutoChannel {
 		r[OffsetChannel] = 0
 		if s.Channel >= 1 && s.Channel <= 4 {
@@ -119,6 +129,90 @@ func TestDecodeAutoChannel(t *testing.T) {
 	}
 	if !got.AutoChannel || got.Channel != 3 {
 		t.Errorf("auto/channel: got auto=%v ch=%d, want auto=true ch=3", got.AutoChannel, got.Channel)
+	}
+}
+
+// The Waveform and Spectrum pages have their own CH 1..4 setting (no
+// Auto); byte 5 carries it and byte 4 stays 0 while Power/SWR is in CH
+// Auto. Frames captured on an LP-700 on 2026-11-19 after CH presses on
+// those pages; the LCD showed CH 4, then CH 2.
+func TestDecodeSamplePageChannelIsNeverAuto(t *testing.T) {
+	tests := []struct {
+		name, hex string
+		top       string
+		ch        int
+	}{
+		{"waveform page, LCD CH 4", "0000030100040b010000040a0000090000000102040000000000002e0130000a0000000000e70000e37b06b784", "waveform", 4},
+		{"spectrum page, LCD CH 2", "0000000200020b010000010a0000090000000202040000000000002e0030000a0000000000640000e37b06b784", "spectrum", 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			frame, err := hex.DecodeString(tt.hex + strings.Repeat("00", ReportSize-len(tt.hex)/2))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if frame[OffsetChannel] != 0 {
+				t.Fatalf("fixture: byte 4 = %d, want 0 (the case under test)", frame[OffsetChannel])
+			}
+			got, err := Decode(frame)
+			if err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if got.TopMode != tt.top || got.AutoChannel || got.Channel != tt.ch {
+				t.Errorf("got top=%s auto=%v ch=%d, want top=%s auto=false ch=%d",
+					got.TopMode, got.AutoChannel, got.Channel, tt.top, tt.ch)
+			}
+		})
+	}
+
+	// Same bytes 4/5 on the Power/SWR page still mean CH Auto locked to N.
+	powerAuto := buildSyntheticFrame(Snapshot{AutoChannel: true, Channel: 2, TopMode: "power_swr", Range: "auto"})
+	got, err := Decode(powerAuto)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.AutoChannel || got.Channel != 2 {
+		t.Errorf("power_swr page: got auto=%v ch=%d, want auto=true ch=2", got.AutoChannel, got.Channel)
+	}
+}
+
+// The Spectrum page carries its "Pwr" readout in 0.018 W steps. Frame
+// captured on the LP-700 (2026-11-19) while the LCD showed 5 W / +37 dBm;
+// the second case sets the raw value seen while it showed 185 W / +52 dBm.
+func TestDecodeSpectrumPowerScale(t *testing.T) {
+	const captured = "011e000200010501020001000000090000000102050100011e000001002a01f40200000000740000e37b06b784"
+	frame, err := hex.DecodeString(captured + strings.Repeat("00", ReportSize-len(captured)/2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	near := func(got, want float64) bool { return math.Abs(got-want) < 0.01 }
+
+	got, err := Decode(frame)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.TopMode != "spectrum" || !near(got.PowerPeakW, 5.148) || !near(got.PeakHoldW, 5.148) {
+		t.Errorf("5 W case: got top=%s peak=%.3f hold=%.3f, want spectrum 5.148 5.148",
+			got.TopMode, got.PowerPeakW, got.PeakHoldW)
+	}
+
+	binary.BigEndian.PutUint16(frame[OffsetPeakPwrHi:], 10303)
+	got, err = Decode(frame)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !near(got.PowerPeakW, 185.454) {
+		t.Errorf("185 W case: got peak=%.3f, want 185.454", got.PowerPeakW)
+	}
+
+	// The same bytes on the Waveform page keep the 0.2 W scale.
+	frame[OffsetTopMode] = 1
+	got, err = Decode(frame)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.TopMode != "waveform" || !near(got.PowerPeakW, 2060.6) {
+		t.Errorf("waveform page: got top=%s peak=%.1f, want waveform 2060.6", got.TopMode, got.PowerPeakW)
 	}
 }
 

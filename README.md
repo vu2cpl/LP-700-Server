@@ -222,6 +222,14 @@ a 320-element 8-bit array assembled from the firmware's cmd-`'1'`..`'5'`
 segments (see [CLAUDE.md](CLAUDE.md) "Scope and spectrum sample
 buffers" and [ARCHITECTURE.md](ARCHITECTURE.md) §4).
 
+On those two pages the telemetry carries what the meter's own screen
+shows there. Waveform: `power_avg_w` and `power_peak_w` as on the
+Power/SWR page. Spectrum: one power reading, the meter's "Pwr" (total
+peak power summed over the frequency bins), in `power_peak_w` /
+`peak_hold_w`; the meter sends no average there (`power_avg_w` is 0)
+and `swr` doesn't hold SWR on that page. Neither page shows SWR on the
+meter, so clients shouldn't either.
+
 Numeric alarm thresholds, callsign, coupler model, and firmware
 revision live in the meter's NVRAM and aren't transmitted via USB at
 all (confirmed by USB pcap audit — see [CLAUDE.md](CLAUDE.md)) so

@@ -91,6 +91,10 @@ const (
 	OffsetSWRLo       = 37 // hypothesis from the older Node-RED parser
 )
 
+// spectrumWattsPerStep scales bytes 0-1 and 23-24 on the Spectrum page,
+// where they carry the meter's summed "Pwr" readout. See Decode.
+const spectrumWattsPerStep = 0.018
+
 // PollReport returns the 64-byte OUT report payload that asks the meter
 // for a fresh telemetry frame. Byte 0 = command character ('0'), rest is
 // zero. The HID owner sends this every tick.
@@ -217,6 +221,40 @@ func Decode(report []byte) (Snapshot, error) {
 		s.TopMode = topModeNames[report[OffsetTopMode]]
 	} else {
 		s.TopMode = "power_swr"
+	}
+
+	// The Waveform and Spectrum pages have their own channel setting,
+	// CH 1..4 only. The LP-500 user guide v5.4: "CH Auto is not offered
+	// in the 'scope mode … The channel selection for the 'scope mode is
+	// independent of the Power/SWR mode" (same for Spectrum). On those
+	// pages byte 5 carries that channel and byte 4 does not mean Auto:
+	// bench 2026-11-19 on the LP-700, with Power/SWR in CH Auto, three
+	// CH presses on the waveform/spectrum page moved byte 5 4 → 1 → 2
+	// (the LCD showed CH 2) while byte 4 stayed 0. Reading byte 4 as
+	// Auto there made the emit gate suppress every scope/spectrum frame.
+	if s.TopMode == "waveform" || s.TopMode == "spectrum" {
+		switch {
+		case chAutoByte >= 1 && chAutoByte <= 4:
+			s.Channel = int(chAutoByte)
+		case chByte >= 1 && chByte <= 4:
+			s.Channel = int(chByte)
+		}
+		s.AutoChannel = false
+	}
+
+	// Spectrum page: the meter's one power readout there ("Pwr", the
+	// total peak power summed over the frequency bins, LP-500 guide v5.4)
+	// comes in bytes 0-1 and 23-24 in steps of 0.018 W, not 0.2 W. Bench
+	// 2026-11-19 on the LP-700, Spectrum page: raw ≈ 10300 while the LCD
+	// showed 185 W / +52 dBm, and raw ≈ 286 while it showed 5 W / +37 dBm
+	// (the LCD drops the decimals); read at 0.2 W they came out as
+	// 2060 W and 57 W. The meter sends no average there (bytes 25-26 stay
+	// 0 while keyed), and bytes 2 / 37 read 1.16-1.29 while the other
+	// pages show 1.55 for the same carrier, so they are not SWR on this
+	// page either. Clients should show only the peak on the Spectrum page.
+	if s.TopMode == "spectrum" {
+		s.PeakHoldW = float64(rawPeakHold) * spectrumWattsPerStep
+		s.PowerPeakW = float64(rawPeak) * spectrumWattsPerStep
 	}
 
 	// Alarm + peak-mode are single bytes per the DataLogger map. Note
