@@ -2,6 +2,7 @@ package lpmeter
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"testing"
@@ -119,6 +120,50 @@ func TestDecodeAutoChannel(t *testing.T) {
 	}
 	if !got.AutoChannel || got.Channel != 3 {
 		t.Errorf("auto/channel: got auto=%v ch=%d, want auto=true ch=3", got.AutoChannel, got.Channel)
+	}
+}
+
+// The Waveform and Spectrum pages have their own CH 1..4 setting (no
+// Auto); byte 5 carries it and byte 4 stays 0 while Power/SWR is in CH
+// Auto. Frames captured on an LP-700 on 2026-11-19 after CH presses on
+// those pages; the LCD showed CH 4, then CH 2.
+func TestDecodeSamplePageChannelIsNeverAuto(t *testing.T) {
+	tests := []struct {
+		name, hex string
+		top       string
+		ch        int
+	}{
+		{"waveform page, LCD CH 4", "0000030100040b010000040a0000090000000102040000000000002e0130000a0000000000e70000e37b06b784", "waveform", 4},
+		{"spectrum page, LCD CH 2", "0000000200020b010000010a0000090000000202040000000000002e0030000a0000000000640000e37b06b784", "spectrum", 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			frame, err := hex.DecodeString(tt.hex + strings.Repeat("00", ReportSize-len(tt.hex)/2))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if frame[OffsetChannel] != 0 {
+				t.Fatalf("fixture: byte 4 = %d, want 0 (the case under test)", frame[OffsetChannel])
+			}
+			got, err := Decode(frame)
+			if err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if got.TopMode != tt.top || got.AutoChannel || got.Channel != tt.ch {
+				t.Errorf("got top=%s auto=%v ch=%d, want top=%s auto=false ch=%d",
+					got.TopMode, got.AutoChannel, got.Channel, tt.top, tt.ch)
+			}
+		})
+	}
+
+	// Same bytes 4/5 on the Power/SWR page still mean CH Auto locked to N.
+	powerAuto := buildSyntheticFrame(Snapshot{AutoChannel: true, Channel: 2, TopMode: "power_swr", Range: "auto"})
+	got, err := Decode(powerAuto)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.AutoChannel || got.Channel != 2 {
+		t.Errorf("power_swr page: got auto=%v ch=%d, want auto=true ch=2", got.AutoChannel, got.Channel)
 	}
 }
 

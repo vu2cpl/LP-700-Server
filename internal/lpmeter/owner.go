@@ -537,12 +537,12 @@ func (o *HIDOwner) emitScope(buf []byte, channel int, autoCh bool, ctx context.C
 	if o.scopeOut == nil {
 		return
 	}
-	// Hardware-invalid guard: the LP-500/700 firmware doesn't support
-	// auto-channel on the waveform / spectrum LCD pages. Sample
-	// buffers captured in that state are indeterminate, so don't
-	// broadcast them — the client would render garbage. Operators
-	// must channel_step to a manual channel (CH1..4) before the
-	// scope/spectrum view becomes meaningful.
+	// Defensive guard. The waveform / spectrum pages have their own
+	// CH 1..4 setting with no Auto, and Decode reports it that way
+	// (byte 5, AutoChannel false), so on a real meter this only trips
+	// on a frame whose channel bytes are out of range. It used to trip
+	// on every frame while Power/SWR was in CH Auto, because byte 4
+	// was read as Auto on these pages too — see Decode.
 	if autoCh || channel < 1 || channel > 4 {
 		o.logger.Debug("scope frame suppressed (invalid channel/auto state)", "channel", channel, "auto_channel", autoCh)
 		return

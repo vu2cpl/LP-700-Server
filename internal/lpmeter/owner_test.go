@@ -125,9 +125,9 @@ func TestIsLikelyTelemetry(t *testing.T) {
 		t.Error("all-zero frame is not a command echo (byte 0 is not a cmd char)")
 	}
 
-	// Real telemetry captured on the waveform page in CH Auto
-	// (2026-11-19, LP-700): top_mode 1, channel byte 0 locked to 4,
-	// range 11 (auto), SWR raw 999. Must still pass.
+	// Real telemetry captured on the waveform page (2026-11-19, LP-700,
+	// LCD on CH 4, Power/SWR in CH Auto): top_mode 1, byte 4 = 0,
+	// byte 5 = 4, range 11 (auto), SWR raw 999. Must still pass.
 	captured, err := hex.DecodeString("0000030100040b010000040a0000090000000102040000000000002e0130000a0000000000e70000e37b06b784" + strings.Repeat("00", 19))
 	if err != nil {
 		t.Fatal(err)
@@ -135,8 +135,8 @@ func TestIsLikelyTelemetry(t *testing.T) {
 	if !isLikelyTelemetry(captured) {
 		t.Error("captured waveform-page telemetry frame should pass isLikelyTelemetry")
 	}
-	if snap, err := Decode(captured); err != nil || snap.TopMode != "waveform" || !snap.AutoChannel || snap.Channel != 4 || snap.Range != "auto" {
-		t.Errorf("captured frame decoded as %+v, err %v; want waveform, CH Auto→4, range auto", snap, err)
+	if snap, err := Decode(captured); err != nil || snap.TopMode != "waveform" || snap.AutoChannel || snap.Channel != 4 || snap.Range != "auto" {
+		t.Errorf("captured frame decoded as %+v, err %v; want waveform, CH 4 (no Auto on this page), range auto", snap, err)
 	}
 
 	// Wrong size: short frame.

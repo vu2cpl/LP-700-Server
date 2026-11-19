@@ -249,13 +249,24 @@ frame and avoids the entire class of bugs. (See
 LP-700-App-side post-mortem for the symptom catalog this fix
 addresses.)
 
-**Gates on emit.** Scope and spectrum frames are only broadcast
-when the meter is on a manual channel (`channel ∈ {1..4}` AND
-`auto_channel == false`). Auto-channel × waveform/spectrum is a
-hardware-invalid combination on the LP-700 firmware; the sample
-buffers in that state are indeterminate and would render as garbage.
-Operators must `channel_step` to a manual channel before the scope/
-spectrum view becomes meaningful.
+**The Waveform and Spectrum pages have their own channel, never
+Auto.** LP-500 user guide v5.4: "CH Auto is not offered in the 'scope
+mode … The channel selection for the 'scope mode is independent of the
+Power/SWR mode" (same wording for Spectrum). On those pages byte 5
+carries that page's CH 1..4, and byte 4 does not mean Auto: on the
+bench (LP-700, 2026-11-19, Power/SWR in CH Auto) CH presses on the
+waveform/spectrum page moved byte 5 4 → 1 → 2 with the LCD showing the
+same channel, while byte 4 stayed 0. `Decode` therefore reports
+`auto_channel: false` and `channel` = byte 5 whenever `top_mode` is
+waveform or spectrum (`TestDecodeSamplePageChannelIsNeverAuto`). On
+these pages F2 (`channel_step`) cycles CH 1 → 2 → 3 → 4 → 1.
+
+**Gates on emit.** Scope and spectrum frames are only broadcast with
+`channel ∈ {1..4}` AND `auto_channel == false`. Since `Decode` never
+reports Auto on these pages, this is now only a guard against
+out-of-range channel bytes. It used to read byte 4 as Auto on these
+pages, which suppressed every scope/spectrum frame whenever the
+Power/SWR page was left in CH Auto.
 
 **Sample rate / time base not yet measured.** Phase 1 reverse-
 engineering captured uniform buffers (steady carrier into dummy

@@ -219,6 +219,25 @@ func Decode(report []byte) (Snapshot, error) {
 		s.TopMode = "power_swr"
 	}
 
+	// The Waveform and Spectrum pages have their own channel setting,
+	// CH 1..4 only. The LP-500 user guide v5.4: "CH Auto is not offered
+	// in the 'scope mode … The channel selection for the 'scope mode is
+	// independent of the Power/SWR mode" (same for Spectrum). On those
+	// pages byte 5 carries that channel and byte 4 does not mean Auto:
+	// bench 2026-11-19 on the LP-700, with Power/SWR in CH Auto, three
+	// CH presses on the waveform/spectrum page moved byte 5 4 → 1 → 2
+	// (the LCD showed CH 2) while byte 4 stayed 0. Reading byte 4 as
+	// Auto there made the emit gate suppress every scope/spectrum frame.
+	if s.TopMode == "waveform" || s.TopMode == "spectrum" {
+		switch {
+		case chAutoByte >= 1 && chAutoByte <= 4:
+			s.Channel = int(chAutoByte)
+		case chByte >= 1 && chByte <= 4:
+			s.Channel = int(chByte)
+		}
+		s.AutoChannel = false
+	}
+
 	// Alarm + peak-mode are single bytes per the DataLogger map. Note
 	// the inverted polarity on byte 7 — see OffsetAlarm comment.
 	s.AlarmEnabled = report[OffsetAlarm] == 0
