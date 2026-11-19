@@ -157,6 +157,15 @@ func (s Snapshot) CloseEnough(o Snapshot) bool {
 		s.StatusMessage == o.StatusMessage
 }
 
+// SameReadings returns true if two snapshots put the same values on the
+// wire: every field except the timestamp is equal. The hub uses it to
+// tell whether a snapshot that CloseEnough held back still has to go
+// out (see hub.Run).
+func (s Snapshot) SameReadings(o Snapshot) bool {
+	s.Timestamp, o.Timestamp = time.Time{}, time.Time{}
+	return s == o
+}
+
 func floatNear(a, b, eps float64) bool {
 	d := a - b
 	if d < 0 {

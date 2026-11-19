@@ -344,6 +344,21 @@ logged once at `levelNotice` (`main.go`: above every level
 "log level changed" line uses) and the web UI shows a notice. It never
 downloads anything and never touches the HID owner or the hub.
 
+**Telemetry dedup and the trailing flush.** The hub sends a telemetry
+frame only when `Snapshot.CloseEnough` says it differs from the last one
+*sent* (0.5 W deadband on the power fields, 0.005 on SWR), so a keyed
+carrier doesn't fan out a frame on every 40 ms poll. The meter's power
+moves in 0.2 W steps (0.018 W on the Spectrum page), so at key-up the last
+frame sent could say 0.2 or 0.4 W and the final 0 W stayed inside the
+deadband: clients, resyncs and new clients (all served `lastJSON`) showed
+0.2 W while the meter read 0 W (bench, 2026-11-19). So every
+`trailingFlush` (500 ms) the hub sends the newest held-back snapshot if
+`Snapshot.SameReadings` says it differs from the last one sent at all.
+Idle readings don't change, so nothing extra goes out; keyed, it adds at
+most 2 frames/s. `TestTrailingFlushSendsHeldBackReading` fails without
+it. Don't widen the deadband or drop the flush without keeping that test
+green.
+
 ## Diagnostic subcommands
 
 ```sh
