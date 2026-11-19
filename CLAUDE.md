@@ -212,16 +212,30 @@ classifies each IN frame on its own merits — three classes:
 1. **Echo** — `byte[0]` in `'0'..'?'` AND every other byte zero.
    Firmware refused the OUT (wrong LCD page, or no-op verb in the
    current state). Dropped.
-2. **Telemetry** — passes a tight byte-range structural check
-   (`isLikelyTelemetry` in `owner.go`): `byte 3 ≤ 3`, `byte 4 ≤ 4`,
-   `byte 5 ≤ 4`, `byte 6 ≤ 11`, `byte 8 ≤ 2`. Random sample data
-   passes all five with probability ≈ 10⁻¹⁰. Decoded as a Snapshot
+2. **Telemetry** — not all-zero, and passes a tight byte-range
+   structural check (`isLikelyTelemetry` in `owner.go`): `byte 3 ≤ 3`,
+   `byte 4 ≤ 4`, `byte 5 ≤ 4`, `byte 6 ≤ 11`, `byte 8 ≤ 2`, plus the
+   alarm-flag, peak ≥ avg and SWR caps. Random sample data passes the
+   five range checks with probability ≈ 10⁻¹⁰. Decoded as a Snapshot
    and broadcast.
 3. **Sample** — everything else. Assembled into the scope/spectrum
    buffer in arrival order (segment index advances per frame,
    resets to 0 on every telemetry frame and on every top-mode
    change). Emitted as a `scope` or `spectrum` WS frame after
    segment 5.
+
+**Idle sample segments are 64 zero bytes.** With no carrier, the
+meter answers a waveform sample cmd with an all-zero frame, and an
+all-zero frame passes every range check (0 is in range everywhere,
+peak 0 ≥ avg 0). Until the all-zero rule was added, each idle segment
+decoded as power_swr / CH Auto / 5W / SWR 1.00, flipped `lastTopMode`
+to power_swr, and sent the next tick back to cmd `'0'`. Clients saw
+top_mode, channel, range and SWR alternate every frame on the
+waveform page and never got a `scope` frame (bench, 2026-11-19,
+v0.2.6). `TestIsLikelyTelemetry` pins the zero frame as non-telemetry
+and a captured real waveform-page frame as telemetry. Random data is
+not the threat model for this classifier; low-entropy sample frames
+are. Treat any new "flapping" report as a classifier leak first.
 
 An earlier implementation matched IN frames to OUT cmds via a write-
 order FIFO. That approach desyncs on any single missed event (stale

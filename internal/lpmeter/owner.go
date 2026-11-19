@@ -199,15 +199,16 @@ func (o *HIDOwner) runOnce(ctx context.Context) error {
 	//   1. ECHO     — byte[0] in cmd-char range AND bytes 1..63 zero.
 	//                 Firmware refused the OUT (wrong LCD page or no-op
 	//                 in current state). Drop.
-	//   2. TELEMETRY — non-echo, AND satisfies tight byte-range
-	//                  invariants (byte 3 ≤ 3, byte 4 ≤ 4, etc.).
-	//                  Probability a sample frame accidentally passes
+	//   2. TELEMETRY — non-echo, not all-zero, AND satisfies tight
+	//                  byte-range invariants (byte 3 ≤ 3, byte 4 ≤ 4,
+	//                  etc.). Probability a random sample frame passes
 	//                  all five invariants ≈ 10⁻¹⁰. Run through Decode.
 	//   3. SAMPLE   — non-echo, fails telemetry invariants. In
 	//                  waveform/spectrum mode this is the next segment
 	//                  of the 5×64-byte buffer; assemble in arrival
 	//                  order (the 1:1 firmware response keeps order
-	//                  aligned with our 6-tick cycle).
+	//                  aligned with our 6-tick cycle). An idle segment
+	//                  (no carrier) is 64 zero bytes and lands here too.
 
 	// Scope / spectrum buffer assembly state. sampleSegIdx advances
 	// with each non-telemetry, non-echo frame received while in a
@@ -438,6 +439,16 @@ func isCommandEcho(frame []byte) bool {
 	return true
 }
 
+// isAllZero reports whether every byte of the frame is zero.
+func isAllZero(frame []byte) bool {
+	for _, b := range frame {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // isLikelyTelemetry reports whether a 64-byte IN frame's structure
 // matches a real telemetry response from cmd '0' or '6': specifically
 // that the header-byte ranges that the Decode function later relies on
@@ -453,8 +464,25 @@ func isCommandEcho(frame []byte) bool {
 // Decode itself enforces, because Decode would also accept some
 // sample frames (those that happen to have all 5 header bytes in
 // range with garbage payload values) and broadcast garbage Snapshots.
+//
+// An all-zero frame is never telemetry. It is what the meter returns
+// for a waveform sample segment when there is no carrier, and every
+// byte-range check below accepts it (0 is in range everywhere, and
+// peak 0 ≥ avg 0). Decoded, it reads as power_swr / CH Auto / 5W /
+// SWR 1.00, so before this check the run loop flipped lastTopMode to
+// power_swr on every idle segment, polled cmd '0' again on the next
+// tick, saw waveform, and never completed a sample cycle: clients saw
+// top_mode / channel / range / SWR flap every frame and no scope
+// frames (bench, 2026-11-19, v0.2.6). Real telemetry carries non-zero
+// bytes (the captured waveform-page frame has the full-scale bytes
+// 30-31 = 0x000a and the bargraph scaling at 27-29 set), and an
+// all-zero frame would decode to nothing meaningful anyway, so
+// rejecting it costs at most one dropped frame.
 func isLikelyTelemetry(frame []byte) bool {
 	if len(frame) != ReportSize {
+		return false
+	}
+	if isAllZero(frame) {
 		return false
 	}
 	if frame[OffsetTopMode] > 3 {

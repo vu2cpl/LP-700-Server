@@ -1,6 +1,10 @@
 package lpmeter
 
-import "testing"
+import (
+	"encoding/hex"
+	"strings"
+	"testing"
+)
 
 func TestIsCommandEcho(t *testing.T) {
 	tests := []struct {
@@ -107,13 +111,32 @@ func TestIsLikelyTelemetry(t *testing.T) {
 		t.Error("sample frame with single in-range header byte must still fail (others out of range)")
 	}
 
-	// Empty/zero frame: byte 0..63 all zero. All header bytes are 0
-	// (in range), peak == avg == 0 (peak >= avg holds). Passes the
-	// check — and would be rejected by the cmd-echo filter upstream
-	// OR by Decode (which has its own range checks).
+	// All-zero frame: what the meter returns for a waveform sample
+	// segment with no carrier. Every byte-range check accepts it, and
+	// neither the echo filter (byte 0 is not a cmd char) nor Decode
+	// rejects it, so it used to decode as power_swr / CH Auto / 5W and
+	// make top_mode flap every frame on the waveform page (bench,
+	// 2026-11-19). It must route as a sample segment instead.
 	zero := make([]byte, ReportSize)
-	if !isLikelyTelemetry(zero) {
-		t.Error("zero frame's header bytes are all in range → should pass isLikelyTelemetry")
+	if isLikelyTelemetry(zero) {
+		t.Error("all-zero frame (idle sample segment) must fail isLikelyTelemetry")
+	}
+	if isCommandEcho(zero) {
+		t.Error("all-zero frame is not a command echo (byte 0 is not a cmd char)")
+	}
+
+	// Real telemetry captured on the waveform page in CH Auto
+	// (2026-11-19, LP-700): top_mode 1, channel byte 0 locked to 4,
+	// range 11 (auto), SWR raw 999. Must still pass.
+	captured, err := hex.DecodeString("0000030100040b010000040a0000090000000102040000000000002e0130000a0000000000e70000e37b06b784" + strings.Repeat("00", 19))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isLikelyTelemetry(captured) {
+		t.Error("captured waveform-page telemetry frame should pass isLikelyTelemetry")
+	}
+	if snap, err := Decode(captured); err != nil || snap.TopMode != "waveform" || !snap.AutoChannel || snap.Channel != 4 || snap.Range != "auto" {
+		t.Errorf("captured frame decoded as %+v, err %v; want waveform, CH Auto→4, range auto", snap, err)
 	}
 
 	// Wrong size: short frame.
